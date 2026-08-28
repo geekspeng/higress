@@ -38,6 +38,9 @@ namespace key_auth {
 
 struct Consumer {
   std::string name;
+  // The group this consumer belongs to. Downstream plugins such as ai-quota
+  // can aggregate by group. Empty means no group.
+  std::string group;
   std::unordered_set<std::string> credentials;
   std::optional<std::vector<std::string>> keys;
   std::optional<bool> in_query = std::nullopt;
@@ -64,6 +67,8 @@ struct KeyAuthConfigRule {
   std::vector<Consumer> consumers;
   std::unordered_set<std::string> credentials;
   std::unordered_map<std::string, std::string> credential_to_name;
+  // Consumer name -> group, only contains consumers with a non-empty group.
+  std::unordered_map<std::string, std::string> name_to_group;
   std::string realm = "MSE Gateway";
   std::vector<std::string> keys;
   bool in_query = true;
@@ -112,6 +117,7 @@ class PluginRootContext : public RootContext,
   bool parsePluginConfig(const json&, KeyAuthConfigRule&) override;
   std::string extractCredential(bool in_header, bool in_query,
                                 const std::string& key) const;
+  void addConsumerHeaders(const KeyAuthConfigRule&, const std::string& name);
 };
 
 // Per-stream context.

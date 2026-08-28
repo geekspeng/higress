@@ -34,6 +34,7 @@ description: Key 认证插件配置参考
 | ------------ | -------- | -------- | ------ | ------------------------ |
 | `credential` | string   | 必填     | -      | 配置该consumer的访问凭证 |
 | `name`       | string   | 必填     | -      | 配置该consumer的名称     |
+| `group`      | string   | 选填     | -      | 配置该consumer所属的分组（ai-quota 等下游插件会按 group 共享额度池）。group 名不可与任何 consumer 的 `name` 重名，否则整个配置会被拒绝 |
 
 ### 鉴权配置（非必需）
 
@@ -54,8 +55,10 @@ global_auth: false
 consumers:
 - credential: 2bda943c-ba2b-11ec-ba07-00163e1250b5
   name: consumer1
+  group: team-a
 - credential: c8c8e9ca-558e-4a2d-bb62-e700dcc40e35
   name: consumer2
+  group: team-a
 keys:
 - apikey
 - x-api-key
@@ -129,6 +132,12 @@ keys:
 - x-api-key
 ```
 
+
+### Group 注入
+
+若 consumer 配置了 `group`，key-auth 会在通过认证后注入 `X-Mse-Consumer-Group` 请求头；下游插件（如 ai-quota）可据此按组聚合额度。详见 ai-quota 插件文档。
+
+**说明：**`group` 名不可与任何 consumer 的 `name` 重名，否则整个插件配置会被拒绝加载。
 
 ## 相关错误码
 

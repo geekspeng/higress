@@ -29,6 +29,7 @@ The configuration field descriptions for each item in `consumers` are as follows
 | ------------ | --------- | ------------ | ------------- | ------------------------------ |
 | `credential` | string    | Required     | -             | Configures the access credential for this consumer. |
 | `name`       | string    | Required     | -             | Configures the name for this consumer.     |
+| `group`      | string    | Optional     | -             | Configures the group this consumer belongs to (downstream plugins such as ai-quota share a quota pool by group). A group name must not duplicate any consumer's `name`; otherwise the entire configuration is rejected. |
 
 ### Authorization Configuration (Optional)
 | Name        | Data Type        | Requirements                                    | Default Value | Description                                                                                                                                                           |
@@ -45,8 +46,10 @@ global_auth: false
 consumers:
 - credential: 2bda943c-ba2b-11ec-ba07-00163e1250b5
   name: consumer1
+  group: team-a
 - credential: c8c8e9ca-558e-4a2d-bb62-e700dcc40e35
   name: consumer2
+  group: team-a
 keys:
 - apikey
 - x-api-key
@@ -115,6 +118,12 @@ keys:
 - apikey
 - x-api-key
 ```
+
+### Group Injection
+
+If a consumer is configured with a `group`, key-auth injects an `X-Mse-Consumer-Group` request header after successful authentication; downstream plugins (such as ai-quota) can aggregate quota by group. See the ai-quota plugin documentation for details.
+
+**Note:** A `group` name must not duplicate any consumer's `name`; otherwise the entire plugin configuration is rejected.
 
 ## Related Error Codes
 | HTTP Status Code | Error Message                                              | Reason Explanation                |

@@ -15,8 +15,10 @@
 #include "extensions/key_auth/plugin.h"
 
 #include <array>
+#include <set>
 
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "common/http_util.h"
 #include "common/json_util.h"
@@ -201,6 +203,17 @@ bool PluginRootContext::parsePluginConfig(const json& configuration,
                 return false;
               }
           }
+          item = consumer.find("group");
+          if (item != consumer.end()) {
+            auto group = JsonValueAs<std::string>(item.value());
+            if (group.second != Wasm::Common::JsonParserResultDetail::OK ||
+                !group.first) {
+              LOG_WARN(
+                  "failed to parse 'group' field in consumer configuration.");
+              return false;
+            }
+            c.group = group.first.value();
+          }
           item = consumer.find("keys");
           if (item == consumer.end()) {
             LOG_DEBUG("not found keys configuration for consumer " + c.name + ", will use global configuration to extract keys");
@@ -242,6 +255,9 @@ bool PluginRootContext::parsePluginConfig(const json& configuration,
               }
               c.in_header = in_header.first;
             }
+          }
+          if (!c.group.empty()) {
+            rule.name_to_group.emplace(c.name, c.group);
           }
           rule.consumers.push_back(std::move(c));
           return true;
@@ -286,6 +302,26 @@ bool PluginRootContext::parsePluginConfig(const json& configuration,
         return false;
       }
     }
+    // G ∩ N check: the group name set and the consumer name set must be
+    // disjoint. A conflict would let downstream plugins that aggregate by
+    // group (e.g. ai-quota) overwrite the private quota key of a same-named
+    // consumer. All conflicts are reported at once so that ops don't have to
+    // restart once per conflict to discover the next one.
+    std::unordered_set<std::string> consumer_names;
+    for (const auto& consumer : rule.consumers) {
+      consumer_names.insert(consumer.name);
+    }
+    std::set<std::string> conflicts;
+    for (const auto& entry : rule.name_to_group) {
+      if (consumer_names.find(entry.second) != consumer_names.end()) {
+        conflicts.insert(entry.second);
+      }
+    }
+    if (!conflicts.empty()) {
+      LOG_WARN(absl::StrCat("consumer groups conflict with consumer names: ",
+                            absl::StrJoin(conflicts, ", ")));
+      return false;
+    }
     // LOG_DEBUG(rule.debugString("parse phase, consumers branch"));
   }
   return true;
@@ -325,6 +361,18 @@ static bool hasPerConsumerKeyConfig(const Consumer& consumer) {
          consumer.in_query.has_value();
 }
 
+// Helper: inject consumer identity headers. X-Mse-Consumer is always set;
+// X-Mse-Consumer-Group is only set when the consumer belongs to a group, so
+// downstream plugins (e.g. ai-quota) can aggregate by group.
+void PluginRootContext::addConsumerHeaders(const KeyAuthConfigRule& rule,
+                                           const std::string& name) {
+  addRequestHeader("X-Mse-Consumer", name);
+  auto group_iter = rule.name_to_group.find(name);
+  if (group_iter != rule.name_to_group.end()) {
+    addRequestHeader("X-Mse-Consumer-Group", group_iter->second);
+  }
+}
+
 bool PluginRootContext::checkPlugin(
     const KeyAuthConfigRule& rule,
     const std::optional<std::unordered_set<std::string>>& allow_set) {
@@ -345,7 +393,7 @@ bool PluginRootContext::checkPlugin(
 
       auto credential_to_name_iter = rule.credential_to_name.find(credential);
       if (credential_to_name_iter != rule.credential_to_name.end()) {
-        addRequestHeader("X-Mse-Consumer", credential_to_name_iter->second);
+        addConsumerHeaders(rule, credential_to_name_iter->second);
         if (!checkAllowSet(allow_set, credential_to_name_iter->second,
                            rule.realm)) {
           return false;
@@ -378,7 +426,7 @@ bool PluginRootContext::checkPlugin(
           continue;
         }
 
-        addRequestHeader("X-Mse-Consumer", iter->second);
+        addConsumerHeaders(rule, iter->second);
         if (!checkAllowSet(allow_set, iter->second, rule.realm)) {
           return false;
         }
@@ -414,7 +462,7 @@ bool PluginRootContext::checkPlugin(
         continue;
       }
 
-      addRequestHeader("X-Mse-Consumer", iter->second);
+      addConsumerHeaders(rule, iter->second);
       if (!checkAllowSet(allow_set, iter->second, rule.realm)) {
         return false;
       }
@@ -457,7 +505,7 @@ bool PluginRootContext::checkPlugin(
           continue;
         }
 
-        addRequestHeader("X-Mse-Consumer", iter->second);
+        addConsumerHeaders(rule, iter->second);
         if (!checkAllowSet(allow_set, iter->second, rule.realm)) {
           return false;
         }

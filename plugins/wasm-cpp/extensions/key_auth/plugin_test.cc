@@ -97,7 +97,10 @@ class KeyAuthTest : public ::testing::Test {
     ON_CALL(*mock_context_, addHeaderMapValue(WasmHeaderMapType::RequestHeaders,
                                               testing::_, testing::_))
         .WillByDefault([&](WasmHeaderMapType, std::string_view key,
-                           std::string_view value) { return WasmResult::Ok; });
+                           std::string_view value) {
+          added_headers_[std::string(key)] = std::string(value);
+          return WasmResult::Ok;
+        });
 
     ON_CALL(*mock_context_, getProperty(testing::_, testing::_))
         .WillByDefault([&](std::string_view path, std::string* result) {
@@ -122,6 +125,8 @@ class KeyAuthTest : public ::testing::Test {
   std::string authority_;
   std::string route_name_;
   std::unordered_map<std::string, std::string> headers_;
+  // Headers added by the plugin via addRequestHeader, keyed by header name.
+  std::unordered_map<std::string, std::string> added_headers_;
 };
 
 TEST_F(KeyAuthTest, InQuery) {
@@ -531,6 +536,146 @@ TEST_F(KeyAuthTest, NoGlobalKeySetting) {
   path_ = "/test?c2key=def";
   EXPECT_EQ(context_->onRequestHeaders(0, false),
             FilterHeadersStatus::Continue);
+}
+
+TEST_F(KeyAuthTest, ConsumerGroupParsed) {
+  std::string configuration = R"(
+{
+  "consumers" : [ {"credential" : "abc", "name" : "consumer1", "group" : "team-a"} ],
+  "keys" : [ "x-api-key" ]
+})";
+  BufferBase buffer;
+  buffer.set(configuration);
+  EXPECT_CALL(*mock_context_, getBuffer(WasmBufferType::PluginConfiguration))
+      .WillOnce([&buffer](WasmBufferType) { return &buffer; });
+  EXPECT_TRUE(root_context_->configure(configuration.size()));
+}
+
+TEST_F(KeyAuthTest, GroupNameConflictRejected) {
+  std::string configuration = R"(
+{
+  "consumers" : [ {"credential" : "token1", "name" : "alice", "group" : "team-a"},
+                  {"credential" : "token2", "name" : "team-a"} ],
+  "keys" : [ "x-api-key" ]
+})";
+  BufferBase buffer;
+  buffer.set(configuration);
+  EXPECT_CALL(*mock_context_, getBuffer(WasmBufferType::PluginConfiguration))
+      .WillOnce([&buffer](WasmBufferType) { return &buffer; });
+  EXPECT_FALSE(root_context_->configure(configuration.size()));
+}
+
+TEST_F(KeyAuthTest, SharedGroupAllowed) {
+  std::string configuration = R"(
+{
+  "consumers" : [ {"credential" : "token1", "name" : "alice", "group" : "team-a"},
+                  {"credential" : "token2", "name" : "bob", "group" : "team-a"} ],
+  "keys" : [ "x-api-key" ]
+})";
+  BufferBase buffer;
+  buffer.set(configuration);
+  EXPECT_CALL(*mock_context_, getBuffer(WasmBufferType::PluginConfiguration))
+      .WillOnce([&buffer](WasmBufferType) { return &buffer; });
+  EXPECT_TRUE(root_context_->configure(configuration.size()));
+}
+
+TEST_F(KeyAuthTest, MultipleGroupConflictsRejected) {
+  std::string configuration = R"(
+{
+  "consumers" : [ {"credential" : "token1", "name" : "alice", "group" : "team-a"},
+                  {"credential" : "token2", "name" : "bob", "group" : "team-b"},
+                  {"credential" : "token3", "name" : "team-a"},
+                  {"credential" : "token4", "name" : "team-b"} ],
+  "keys" : [ "x-api-key" ]
+})";
+  BufferBase buffer;
+  buffer.set(configuration);
+  EXPECT_CALL(*mock_context_, getBuffer(WasmBufferType::PluginConfiguration))
+      .WillOnce([&buffer](WasmBufferType) { return &buffer; });
+  EXPECT_FALSE(root_context_->configure(configuration.size()));
+}
+
+TEST_F(KeyAuthTest, InjectsConsumerGroupHeader) {
+  std::string configuration = R"(
+{
+  "consumers" : [ {"credential" : "token1", "name" : "alice", "group" : "team-a"} ],
+  "keys" : [ "x-api-key" ]
+})";
+  BufferBase buffer;
+  buffer.set(configuration);
+  EXPECT_CALL(*mock_context_, getBuffer(WasmBufferType::PluginConfiguration))
+      .WillOnce([&buffer](WasmBufferType) { return &buffer; });
+  EXPECT_TRUE(root_context_->configure(configuration.size()));
+
+  path_ = "/test";
+  headers_["x-api-key"] = "token1";
+  EXPECT_EQ(context_->onRequestHeaders(0, false),
+            FilterHeadersStatus::Continue);
+  EXPECT_EQ(added_headers_["X-Mse-Consumer"], "alice");
+  EXPECT_EQ(added_headers_["X-Mse-Consumer-Group"], "team-a");
+}
+
+TEST_F(KeyAuthTest, NoConsumerGroupHeaderWhenAbsent) {
+  std::string configuration = R"(
+{
+  "consumers" : [ {"credential" : "abc", "name" : "consumer1"} ],
+  "keys" : [ "x-api-key" ]
+})";
+  BufferBase buffer;
+  buffer.set(configuration);
+  EXPECT_CALL(*mock_context_, getBuffer(WasmBufferType::PluginConfiguration))
+      .WillOnce([&buffer](WasmBufferType) { return &buffer; });
+  EXPECT_TRUE(root_context_->configure(configuration.size()));
+
+  path_ = "/test";
+  headers_["x-api-key"] = "abc";
+  EXPECT_EQ(context_->onRequestHeaders(0, false),
+            FilterHeadersStatus::Continue);
+  EXPECT_EQ(added_headers_["X-Mse-Consumer"], "consumer1");
+  EXPECT_EQ(added_headers_.find("X-Mse-Consumer-Group"),
+            added_headers_.end());
+}
+
+TEST_F(KeyAuthTest, ConsumerGroupHeaderSlowPath) {
+  std::string configuration = R"(
+{
+  "global_auth": false,
+  "consumers": [
+    {
+      "name": "c1",
+      "credentials": ["123"],
+      "keys": ["c1key"],
+      "in_header": false,
+      "in_query": true,
+      "group": "team-a"
+    },
+    {
+      "name": "c2",
+      "credentials": ["abc"],
+      "keys": ["c2key"],
+      "in_header": false,
+      "in_query": true
+    }
+  ],
+  "_rules_": [
+    {
+      "_match_route_": ["test"],
+      "allow": ["c1"]
+    }
+  ]
+})";
+  BufferBase buffer;
+  buffer.set(configuration);
+  EXPECT_CALL(*mock_context_, getBuffer(WasmBufferType::PluginConfiguration))
+      .WillOnce([&buffer](WasmBufferType) { return &buffer; });
+  EXPECT_TRUE(root_context_->configure(configuration.size()));
+
+  route_name_ = "test";
+  path_ = "/test?c1key=123";
+  EXPECT_EQ(context_->onRequestHeaders(0, false),
+            FilterHeadersStatus::Continue);
+  EXPECT_EQ(added_headers_["X-Mse-Consumer"], "c1");
+  EXPECT_EQ(added_headers_["X-Mse-Consumer-Group"], "team-a");
 }
 
 }  // namespace key_auth
